@@ -2,7 +2,6 @@
 Demo without Camera — Test the model on all 26 ASL letters
 Run: python demo_no_camera.py
 """
-
 import numpy as np
 import pickle
 import sys, os
