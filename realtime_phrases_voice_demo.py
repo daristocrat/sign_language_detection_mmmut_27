@@ -5,7 +5,8 @@ Recognizes 15 common ASL word signs and SPEAKS them:
   hello, thank_you, please, yes, no, i_love_you,
   good, bad, help, more, eat, stop, sorry, wait, name
 
-Voice is in phrase_voice.py (threaded pyttsx3, non-blocking).
+Voice is in phrase_voice.py v2 (threaded pyttsx3, NON-BLOCKING,
+interruptible). SPACE speaks instantly, V speaks all selected phrases.
 This file is realtime_phrases_demo.py + voice only - the
 detection, smoothing and UI are unchanged.
 
@@ -17,14 +18,21 @@ SETUP (one-time):
 
 Then run:
     python realtime_phrases_voice_demo.py
-    python realtime_phrases_voice_demo.py --auto-speak   # speak every stable phrase
-    python realtime_phrases_voice_demo.py --no-voice     # silent mode
-    python realtime_phrases_voice_demo.py --rate 200     # faster voice
+    python realtime_phrases_voice_demo.py --no-auto-speak  # only speak on SPACE / V
+    python realtime_phrases_voice_demo.py --no-voice        # silent mode
+    python realtime_phrases_voice_demo.py --rate 200        # faster voice
+
+How it works now:
+  SPACE - select a phrase: it is logged AND spoken instantly,
+          interrupting anything still speaking. No queue, no delay.
+  V     - speak ALL selected phrases, in order, as one sentence.
+  Auto-speak is ON by default: hold a sign steady ~0.6s and it
+  speaks by itself, without pressing SPACE.
 
 Controls:
-  SPACE     - Log current phrase + SPEAK it
-  V         - Speak the whole logged sentence
-  A         - Toggle auto-speak on/off
+  SPACE     - Select phrase + SPEAK it instantly
+  V         - Speak ALL selected phrases
+  A         - Toggle auto-speak on/off (default ON)
   M         - Mute / Unmute voice
   + / -     - Faster / slower voice
   BACKSPACE - Delete last word
@@ -212,9 +220,13 @@ def draw_ui(frame, phrase, confidence, top3, log, fps, voice_status='', auto_spe
 # ── Main ─────────────────────────────────────────────────────────
 def run_realtime(args=None):
     # Voice output (threaded, non-blocking - video never freezes)
-    voice = PhraseVoice(rate=getattr(args, 'rate', 175),
+    voice = PhraseVoice(rate=getattr(args, 'rate', 190),
                         enabled=not getattr(args, 'no_voice', False))
-    auto_speak = getattr(args, 'auto_speak', False)
+    # Auto-speak ON by default (v2): a steady sign speaks by itself.
+    # --no-auto-speak turns it off; A toggles it live.
+    auto_speak = not getattr(args, 'no_auto_speak', False)
+    if getattr(args, 'auto_speak', False):
+        auto_speak = True
     print(f"[*] {voice.status()}")
     if voice.error:
         print(f"    {voice.error}")
@@ -269,9 +281,12 @@ def run_realtime(args=None):
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     smoother  = PredictionSmoother(window=PREDICTION_SMOOTHING)
-    log       = ""
+    log       = ""          # display names, shown on screen
+    display_list = []       # display names, in order, parallel to spoken_log
+    spoken_log = []         # spoken sentences, in order, for V key
     prev_time = time.time()
     last_spoken_phrase = None
+    last_spoken_time = 0.0
     stable_since = None
     last_stable_phrase = None
 
@@ -309,8 +324,10 @@ def run_realtime(args=None):
                 smoother.update(phrase, confidence)
                 phrase, confidence = smoother.get_stable()
 
-                # --- Auto-speak: speak a phrase once it has been
-                # stable for 1.2s, and only once per phrase ---
+                # --- Auto-speak (ON by default): speak once the sign
+                # has been steady for 0.6s. speak_now() interrupts, so
+                # there is no queue delay. Re-speaking the same sign
+                # needs a 1.5s gap, so holding it does not loop. ---
                 now = time.time()
                 if phrase != last_stable_phrase:
                     last_stable_phrase = phrase
@@ -318,13 +335,16 @@ def run_realtime(args=None):
                 elif (auto_speak and phrase not in ("?", "–", None)
                         and confidence >= CONFIDENCE_THRESHOLD
                         and stable_since is not None
-                        and now - stable_since >= 1.2
-                        and phrase != last_spoken_phrase):
+                        and now - stable_since >= 0.6
+                        and now - last_spoken_time >= 1.5):
                     display = DISPLAY_NAMES.get(phrase, phrase)
-                    log += (" " if log else "") + display
-                    voice.speak_phrase(phrase)
+                    display_list.append(display)
+                    log = " ".join(display_list)
+                    spoken_log.append(SPOKEN_TEXT[phrase])
+                    voice.speak_phrase(phrase)  # speak_now: instant
                     print(f"   Auto-spoke '{display}' -> '{log}'")
                     last_spoken_phrase = phrase
+                    last_spoken_time = now
 
         except Exception as e:
             cv2.putText(frame, f"Detection error: {e}",
@@ -354,14 +374,27 @@ def run_realtime(args=None):
         elif key == ord(' '):
             if phrase and phrase not in ("?", "–", None):
                 display = DISPLAY_NAMES.get(phrase, phrase)
-                log += (" " if log else "") + display
+                display_list.append(display)
+                log = " ".join(display_list)
+                spoken_log.append(SPOKEN_TEXT[phrase])
+                # speak_phrase -> speak_now: stops anything speaking
+                # and starts this phrase immediately, no queue delay.
                 voice.speak_phrase(phrase)
                 last_spoken_phrase = phrase
-                print(f"   Logged + spoke '{display}' → '{log}'")
-        elif key == ord('v'):
-            if log:
+                last_spoken_time = time.time()
+                print(f"   SPACE: spoke '{display}' instantly -> '{log}'")
+        elif key in (ord('v'), ord('V')):
+            # V: speak ALL selected phrases, in order, as one sentence.
+            # Uses the spoken sentences, not the display names, so
+            # "Eat / Food" is spoken as "I want to eat." etc.
+            if spoken_log:
+                voice.speak_all(spoken_log)
+                print(f"   V: speaking all {len(spoken_log)} phrases: '{' '.join(spoken_log)}'")
+            elif log:
                 voice.speak_text(log)
-                print(f"   Speaking sentence: '{log}'")
+                print(f"   V: speaking sentence: '{log}'")
+            else:
+                print("   V: nothing selected yet - press SPACE on a phrase first")
         elif key == ord('a'):
             auto_speak = not auto_speak
             print(f"   Auto-speak {'ON' if auto_speak else 'OFF'}")
@@ -372,12 +405,17 @@ def run_realtime(args=None):
             print(f"   Voice speed: {voice.change_rate(20)} wpm")
         elif key == ord('-'):
             print(f"   Voice speed: {voice.change_rate(-20)} wpm")
-        elif key == 8:   # BACKSPACE — delete last word
-            words = log.rsplit(' ', 1)
-            log   = words[0] if len(words) > 1 else ""
+        elif key == 8:   # BACKSPACE — delete last selected phrase
+            if spoken_log:
+                spoken_log.pop()
+                display_list.pop()
+                log = " ".join(display_list)
+            voice.stop()
         elif key == 13:  # ENTER — clear
             print(f"   Log: '{log}'")
             log = ""
+            display_list.clear()
+            spoken_log.clear()
             last_spoken_phrase = None
             voice.stop()
 
@@ -391,9 +429,11 @@ def run_realtime(args=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ASL phrases + voice output")
     parser.add_argument('--auto-speak', action='store_true',
-                        help='Speak every stable phrase automatically')
+                        help='Speak every stable phrase automatically (default ON)')
+    parser.add_argument('--no-auto-speak', action='store_true',
+                        help='Only speak on SPACE / V, never automatically')
     parser.add_argument('--no-voice', action='store_true',
                         help='Run silent, no text-to-speech')
-    parser.add_argument('--rate', type=int, default=175,
-                        help='Voice speed in words per minute (default 175)')
+    parser.add_argument('--rate', type=int, default=190,
+                        help='Voice speed in words per minute (default 190)')
     run_realtime(parser.parse_args())
